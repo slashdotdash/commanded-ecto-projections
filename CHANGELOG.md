@@ -5,6 +5,15 @@
 - Add `.formatter.exs` to Hex package ([#19](https://github.com/commanded/commanded-ecto-projections/pull/19)).
 - Add microseconds to timestamp fields in `projection_versions` ([#22](https://github.com/commanded/commanded-ecto-projections/pull/22)).
 
+### Upgrading
+
+- Upgrade your existing `projection_versions` table by running:
+
+  ```sql
+  ALTER TABLE projection_versions ALTER COLUMN inserted_at TYPE timestamp with time zone USING inserted_at AT TIME ZONE 'UTC';
+  ALTER TABLE projection_versions ALTER COLUMN updated_at TYPE timestamp with time zone USING updated_at AT TIME ZONE 'UTC';
+  ```
+
 ## v0.8.0
 
 ### Enhancements
@@ -54,7 +63,6 @@
 ### Enhancements
 
 - Allow an Ecto schema prefix to be defined in config or per handler ([#4](https://github.com/commanded/commanded-ecto-projections/pull/4)).
-
 
 ## v0.4.0
 
