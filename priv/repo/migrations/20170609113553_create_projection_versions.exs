@@ -6,7 +6,7 @@ defmodule Commanded.Projections.Repo.Migrations.CreateProjectionVersions do
       add :projection_name, :text, primary_key: true
       add :last_seen_event_number, :bigint
 
-      timestamps()
+      timestamps(type: :timestamptz)
     end
   end
 end
