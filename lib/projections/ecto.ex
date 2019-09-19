@@ -34,6 +34,8 @@ defmodule Commanded.Projections.Ecto do
     schema_prefix =
       opts[:schema_prefix] || Application.get_env(:commanded_ecto_projections, :schema_prefix)
 
+    call_after_update_for_noop? = opts[:call_after_update_for_noop?] == true
+
     quote location: :keep do
       @opts unquote(opts)
       @repo @opts[:repo] || Application.get_env(:commanded_ecto_projections, :repo) ||
@@ -41,11 +43,12 @@ defmodule Commanded.Projections.Ecto do
       @projection_name @opts[:name] || raise("#{inspect(__MODULE__)} expects :name to be given")
       @schema_prefix unquote(schema_prefix)
       @timeout @opts[:timeout] || :infinity
+      @call_after_update_for_noop? unquote(call_after_update_for_noop?)
 
       # Pass through any other configuration to the event handler
       @handler_opts Keyword.drop(@opts, [:repo, :schema_prefix, :timeout])
 
-      unquote(__include_projection_version_schema__(schema_prefix))
+      unquote do: Commanded.Projections.ProjectionVersion.__include__(prefix: schema_prefix)
 
       use Ecto.Schema
       use Commanded.Event.Handler, @handler_opts
@@ -55,46 +58,63 @@ defmodule Commanded.Projections.Ecto do
       import unquote(__MODULE__)
 
       def update_projection(event, %{event_number: event_number} = metadata, multi_fn) do
-        changeset =
-          ProjectionVersion.changeset(%ProjectionVersion{projection_name: @projection_name}, %{
-            last_seen_event_number: event_number
-          })
+        initial_multi = setup_transaction(event_number)
 
-        multi =
-          Ecto.Multi.new()
-          |> Ecto.Multi.run(:verify_projection_version, fn _repo, _changes ->
-            version =
-              case @repo.get(ProjectionVersion, @projection_name) do
-                nil ->
-                  @repo.insert!(%ProjectionVersion{
-                    projection_name: @projection_name,
-                    last_seen_event_number: 0
-                  })
-
-                version ->
-                  version
-              end
-
-            if version.last_seen_event_number == nil ||
-                 version.last_seen_event_number < event_number do
-              {:ok, %{version: version}}
-            else
-              {:error, :already_seen_event}
-            end
-          end)
-          |> Ecto.Multi.update(
-            :projection_version,
-            changeset,
-            prefix: unquote(schema_prefix)
-          )
-
-        with %Ecto.Multi{} = multi <- apply_projection_to_multi(multi, multi_fn),
+        with %Ecto.Multi{} = multi <- apply_projection_to_multi(initial_multi, multi_fn),
+             {:noop?, false} <- {:noop?, multi == initial_multi},
              {:ok, changes} <- attempt_transaction(multi) do
           after_update(event, metadata, changes)
         else
-          {:error, :verify_projection_version, :already_seen_event, _changes} -> :ok
-          {:error, _stage, error, _changes} -> {:error, error}
-          {:error, error} -> {:error, error}
+          {:noop?, true} ->
+            unquote(
+              if call_after_update_for_noop? do
+                quote do: after_update(event, metadata, :noop)
+              else
+                :ok
+              end
+            )
+
+          {:error, :verify_projection_version, :already_seen_event, _changes} ->
+            :ok
+
+          {:error, _stage, error, _changes} ->
+            {:error, error}
+
+          {:error, error} ->
+            {:error, error}
+        end
+      end
+
+      defp setup_transaction(event_number) do
+        changeset =
+          ProjectionVersion.changeset(
+            %ProjectionVersion{projection_name: @projection_name},
+            %{last_seen_event_number: event_number}
+          )
+
+        Ecto.Multi.new()
+        |> Ecto.Multi.run(:verify_projection_version, &verify_projection_version(&1, &2, event_number))
+        |> Ecto.Multi.update(:projection_version, changeset, prefix: unquote(schema_prefix))
+      end
+
+      defp verify_projection_version(_repo, _changes, event_number) do
+        version =
+          case @repo.get(ProjectionVersion, @projection_name) do
+            nil ->
+              @repo.insert!(%ProjectionVersion{
+                projection_name: @projection_name,
+                last_seen_event_number: 0
+              })
+
+            version ->
+              version
+          end
+
+        if version.last_seen_event_number == nil ||
+             version.last_seen_event_number < event_number do
+          {:ok, %{version: version}}
+        else
+          {:error, :already_seen_event}
         end
       end
 
@@ -116,33 +136,6 @@ defmodule Commanded.Projections.Ecto do
           @repo.transaction(multi, timeout: @timeout, pool_timeout: @timeout)
         rescue
           e -> {:error, e}
-        end
-      end
-    end
-  end
-
-  defp __include_projection_version_schema__(prefix) do
-    quote do
-      defmodule ProjectionVersion do
-        @moduledoc false
-
-        use Ecto.Schema
-
-        import Ecto.Changeset
-
-        @primary_key {:projection_name, :string, []}
-        @schema_prefix unquote(prefix)
-
-        schema "projection_versions" do
-          field(:last_seen_event_number, :integer)
-
-          timestamps(type: :naive_datetime_usec)
-        end
-
-        @required_fields ~w(last_seen_event_number)a
-
-        def changeset(model, params \\ :invalid) do
-          cast(model, params, @required_fields)
         end
       end
     end
